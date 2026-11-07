@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reverse Audio</title>
+<style>
+  :root{
+    --bg:#f6f3ee; --ink:#1d1b18; --muted:#6f6a62; --card:#fffdf9;
+    --line:#e4ded4; --rec:#d6452f; --accent:#2f5d50; --accent2:#7a4fb0;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{ --bg:#171614; --ink:#f1ede6; --muted:#a39d93; --card:#211f1c; --line:#35322d; }
+  }
+  *{box-sizing:border-box}
+  body{margin:0;min-height:100vh;background:var(--bg);color:var(--ink);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+    display:flex;justify-content:center;padding:32px 20px}
+  main{width:100%;max-width:420px;display:flex;flex-direction:column;align-items:center;gap:22px}
+  h1{font-size:22px;margin:0;letter-spacing:-.01em}
+  .sub{color:var(--muted);font-size:14px;margin:-12px 0 0;text-align:center}
+  .recbtn{width:150px;height:150px;border-radius:50%;border:none;cursor:pointer;
+    background:var(--rec);color:#fff;font-size:17px;font-weight:600;
+    box-shadow:0 8px 24px rgba(214,69,47,.3);transition:transform .15s;
+    display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px}
+  .recbtn:active{transform:scale(.96)}
+  .recbtn .dot{width:26px;height:26px;border-radius:50%;background:#fff}
+  .recbtn.on .dot{border-radius:5px;width:24px;height:24px}
+  .recbtn.on{animation:pulse 1.4s infinite}
+  @keyframes pulse{0%,100%{box-shadow:0 0 0 0 rgba(214,69,47,.45)}50%{box-shadow:0 0 0 18px rgba(214,69,47,0)}}
+  .timer{font-variant-numeric:tabular-nums;color:var(--muted);font-size:15px;min-height:20px}
+  canvas{width:100%;height:70px;background:var(--card);border:1px solid var(--line);border-radius:12px}
+  .row{display:flex;gap:12px;width:100%}
+  .play{flex:1;padding:16px 10px;border-radius:14px;border:none;font-size:16px;font-weight:600;
+    color:#fff;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:8px}
+  .play:disabled{opacity:.35;cursor:default}
+  #normal{background:var(--accent)} #reverse{background:var(--accent2)}
+  .status{font-size:13px;color:var(--muted);text-align:center;min-height:18px}
+  .alt{font-size:13px;color:var(--muted);text-align:center;border-top:1px solid var(--line);padding-top:16px;width:100%}
+  .alt label{display:inline-block;margin-top:8px;padding:10px 16px;border-radius:10px;
+    border:1px solid var(--line);background:var(--card);color:var(--ink);font-weight:600;cursor:pointer}
+  .alt input{display:none}
+</style>
+</head>
+<body>
+<main>
+  <h1>Reverse Audio</h1>
+  <p class="sub">Record, then play it normally or backwards.</p>
+
+  <button class="recbtn" id="rec" aria-label="Record">
+    <span class="dot"></span><span id="recLabel">Record</span>
+  </button>
+  <div class="timer" id="timer"></div>
+
+  <canvas id="wave" width="800" height="140"></canvas>
+
+  <div class="row">
+    <button class="play" id="normal" disabled>▶ Normal</button>
+    <button class="play" id="reverse" disabled>◀ Reverse</button>
+  </div>
+  <div class="status" id="status"></div>
+
+  <div class="alt">
+    If the microphone is blocked here, record with your phone or pick an audio file:
+    <br><label>🎙 Record / choose audio<input type="file" id="file" accept="audio/*" capture></label>
+  </div>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+let ctx, recorder, chunks = [], stream, buffer, revBuffer, source, t0, tick;
+
+function getCtx(){ if(!ctx) ctx = new (window.AudioContext||window.webkitAudioContext)(); return ctx; }
+function status(m){ $('status').textContent = m || ''; }
+
+$('rec').onclick = async () => {
+  if (recorder && recorder.state === 'recording') { recorder.stop(); return; }
+  stopPlayback();
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({audio:true});
+  } catch(e) {
+    status('Microphone not available here — use the button below instead.');
+    return;
+  }
+  getCtx();
+  chunks = [];
+  recorder = new MediaRecorder(stream);
+  recorder.ondataavailable = e => { if (e.data.size) chunks.push(e.data); };
+  recorder.onstop = async () => {
+    stream.getTracks().forEach(t => t.stop());
+    clearInterval(tick);
+    $('rec').classList.remove('on'); $('recLabel').textContent = 'Record';
+    await loadBlob(new Blob(chunks, {type: recorder.mimeType}));
+  };
+  recorder.start();
+  $('rec').classList.add('on'); $('recLabel').textContent = 'Stop';
+  t0 = Date.now(); status('Recording…');
+  tick = setInterval(() => { $('timer').textContent = fmt((Date.now()-t0)/1000); }, 200);
+};
+
+$('file').onchange = async e => {
+  const f = e.target.files[0]; if (!f) return;
+  stopPlayback(); getCtx();
+  await loadBlob(f);
+  e.target.value = '';
+};
+
+async function loadBlob(blob){
+  try {
+    status('Processing…');
+    const data = await blob.arrayBuffer();
+    buffer = await new Promise((res, rej) => getCtx().decodeAudioData(data, res, rej));
+    revBuffer = getCtx().createBuffer(buffer.numberOfChannels, buffer.length, buffer.sampleRate);
+    for (let c = 0; c < buffer.numberOfChannels; c++) {
+      const d = new Float32Array(buffer.getChannelData(c));
+      d.reverse();
+      revBuffer.copyToChannel ? revBuffer.copyToChannel(d, c) : revBuffer.getChannelData(c).set(d);
+    }
+    $('normal').disabled = $('reverse').disabled = false;
+    $('timer').textContent = fmt(buffer.duration);
+    draw(buffer);
+    status('Ready.');
+  } catch(err) {
+    status('Could not read that audio.');
+  }
+}
+
+function play(buf, label){
+  stopPlayback();
+  const ac = getCtx(); if (ac.state === 'suspended') ac.resume();
+  source = ac.createBufferSource();
+  source.buffer = buf; source.connect(ac.destination);
+  source.onended = () => status('Ready.');
+  source.start();
+  status('Playing ' + label + '…');
+}
+function stopPlayback(){ if (source) { try{ source.onended = null; source.stop(); }catch(e){} source = null; } }
+
+$('normal').onclick = () => play(buffer, 'normal');
+$('reverse').onclick = () => play(revBuffer, 'in reverse');
+
+function fmt(s){ const m = Math.floor(s/60); return m + ':' + String(Math.floor(s%60)).padStart(2,'0'); }
+
+function draw(buf){
+  const cv = $('wave'), g = cv.getContext('2d'), w = cv.width, h = cv.height;
+  const d = buf.getChannelData(0), step = Math.max(1, Math.floor(d.length / w));
+  g.clearRect(0,0,w,h);
+  g.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#2f5d50';
+  for (let x = 0; x < w; x++) {
+    let max = 0;
+    for (let i = 0; i < step; i++) { const v = Math.abs(d[x*step+i] || 0); if (v > max) max = v; }
+    const bh = Math.max(2, max * h * 0.9);
+    g.fillRect(x, (h - bh)/2, 1, bh);
+  }
+}
+</script>
+</body>
+</html>

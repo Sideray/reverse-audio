@@ -116,6 +116,8 @@ async function loadBlob(blob){
       d.reverse();
       revBuffer.copyToChannel ? revBuffer.copyToChannel(d, c) : revBuffer.getChannelData(c).set(d);
     }
+    Object.values(urls).forEach(u => URL.revokeObjectURL(u));
+    urls = { normal: toWav(buffer), reverse: toWav(revBuffer) };
     $('normal').disabled = $('reverse').disabled = false;
     $('timer').textContent = fmt(buffer.duration);
     draw(buffer);
@@ -125,19 +127,39 @@ async function loadBlob(blob){
   }
 }
 
-function play(buf, label){
-  stopPlayback();
-  const ac = getCtx(); if (ac.state === 'suspended') ac.resume();
-  source = ac.createBufferSource();
-  source.buffer = buf; source.connect(ac.destination);
-  source.onended = () => status('Ready.');
-  source.start();
-  status('Playing ' + label + '…');
-}
-function stopPlayback(){ if (source) { try{ source.onended = null; source.stop(); }catch(e){} source = null; } }
+// Play through an <audio> element (works even when the iPhone is on silent)
+const player = new Audio();
+player.setAttribute('playsinline', '');
+let urls = {};
 
-$('normal').onclick = () => play(buffer, 'normal');
-$('reverse').onclick = () => play(revBuffer, 'in reverse');
+function toWav(buf){
+  const ch = buf.numberOfChannels, sr = buf.sampleRate, len = buf.length;
+  const out = new DataView(new ArrayBuffer(44 + len * ch * 2));
+  const w = (o, s) => { for (let i = 0; i < s.length; i++) out.setUint8(o + i, s.charCodeAt(i)); };
+  w(0,'RIFF'); out.setUint32(4, 36 + len*ch*2, true); w(8,'WAVE'); w(12,'fmt ');
+  out.setUint32(16,16,true); out.setUint16(20,1,true); out.setUint16(22,ch,true);
+  out.setUint32(24,sr,true); out.setUint32(28,sr*ch*2,true); out.setUint16(32,ch*2,true);
+  out.setUint16(34,16,true); w(36,'data'); out.setUint32(40,len*ch*2,true);
+  const data = []; for (let c = 0; c < ch; c++) data.push(buf.getChannelData(c));
+  let o = 44;
+  for (let i = 0; i < len; i++) for (let c = 0; c < ch; c++) {
+    const s = Math.max(-1, Math.min(1, data[c][i]));
+    out.setInt16(o, s < 0 ? s * 0x8000 : s * 0x7FFF, true); o += 2;
+  }
+  return URL.createObjectURL(new Blob([out], {type:'audio/wav'}));
+}
+
+function play(key, label){
+  stopPlayback();
+  player.src = urls[key];
+  player.onended = () => status('Ready.');
+  player.play().then(() => status('Playing ' + label + '…'))
+    .catch(() => status('Could not play — tap again.'));
+}
+function stopPlayback(){ try { player.pause(); player.currentTime = 0; } catch(e){} }
+
+$('normal').onclick = () => play('normal', 'normal');
+$('reverse').onclick = () => play('reverse', 'in reverse');
 
 function fmt(s){ const m = Math.floor(s/60); return m + ':' + String(Math.floor(s%60)).padStart(2,'0'); }
 
